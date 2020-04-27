@@ -1,0 +1,240 @@
+---
+title: "Predicting Quality of Weight lifting"
+author: "M Aishwarya"
+date: "27/04/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE, message=FALSE, warning=FALSE)
+```
+
+## Synopsis
+This report aims to build a classification model, to predict the quality of weight lifting exercise performed. We build the model using Random forests, and then use it to identify the important features, to build a smaller and faster model with equivalent accuracy. Data source: Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. The quality of exercise is divided into 5 classes, as mentioned [here](http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises).    
+We have obtained an accuracy of around 97.6%, and out sample error around 2.43% for the final model
+
+## Loading data and libraries  
+Loading required libraries  
+```{r}
+library(caret)
+library(dplyr)
+library(mlbench)
+library(parallel)
+library(doParallel)
+library(rattle)
+```
+
+Fetching data  
+```{r}
+train_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+test_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+if (!file.exists("pml_train.csv"))
+  download.file(train_url, destfile = "pml_train.csv")
+if (!file.exists("pml_test.csv"))
+  download.file(test_url, destfile = "pml_test.csv")
+```
+Reading data  
+```{r}
+train_data = read.csv("pml_train.csv")
+test_data = read.csv("pml_test.csv")
+dim(train_data);dim(test_data)
+```
+
+## Preprocessing  
+```{r}
+dim(train_data)
+na_col <- colSums(is.na(train_data))
+table(na_col)
+```
+
+There are 19622 rows and 160 columns in this dataframe, of these, 67 columns are completely NA, so they are removed  
+```{r}
+train_data <- train_data[names(train_data)[na_col == 0]]
+```
+```{r, results="hide"}
+summary(train_data) #Results hidden, as its very long
+```
+On analysing the summary, we find that few of the columns have same values for majority of the rows, that is all columns of type factor have 19216 rows with identical values. This indicates, they will not be of much use in prediction. So we drop them.
+Additionally the following cloumns are dropped:  
+
+- X column is dropped as it is the index, and should not have an impact on exercise quality
+- user_name is dropped, as we want the model to be generalized, and not fit to particular persons
+- timestamp columns are dropped as the time/day should not affect the prediction. (It can be argued that time might have an impact on people doing exercise, but we do not consider it here, as we are not performing any timeseries prediction)
+- Even num_window is dropped, as we have already removed new_window, timestamp columns; and it is not meaningful to include it.
+
+```{r}
+train_data_clean <- train_data %>% select(-c(X,user_name,new_window,num_window,raw_timestamp_part_1,raw_timestamp_part_2,cvtd_timestamp,
+kurtosis_roll_belt, kurtosis_picth_belt, kurtosis_yaw_belt, skewness_roll_belt, skewness_roll_belt.1,
+skewness_yaw_belt,  max_yaw_belt,    min_yaw_belt,   amplitude_yaw_belt,
+kurtosis_roll_arm, kurtosis_picth_arm, kurtosis_yaw_arm, skewness_roll_arm,
+skewness_pitch_arm, skewness_yaw_arm,
+kurtosis_roll_dumbbell, kurtosis_picth_dumbbell, kurtosis_yaw_dumbbell, skewness_roll_dumbbell,
+skewness_pitch_dumbbell, skewness_yaw_dumbbell, max_yaw_dumbbell, min_yaw_dumbbell,
+ amplitude_yaw_dumbbell,
+ kurtosis_roll_forearm,
+kurtosis_picth_forearm, kurtosis_yaw_forearm, skewness_roll_forearm, skewness_pitch_forearm,
+skewness_yaw_forearm, max_yaw_forearm, min_yaw_forearm, amplitude_yaw_forearm))
+```
+
+This should be repeated for test set also, to ensure predictions can be made.  
+```{r}
+selected_columns <- names(train_data_clean)
+selected_columns <- selected_columns[-53] #Excluding the 'classe' column name
+#selected_columns
+test_data_clean <- test_data %>% select(selected_columns)
+```
+
+- As this is a classification problem, we need to choose some classification algorithms like trees
+- As the data is high dimensional we go for Random forests, as it can fit complex patterns.
+- As the data size is large, we opt for parallel processing by following the steps mentioned [here](https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-randomForestPerformance.md)
+- We split the training data into train and validation sets (to get out sample error)
+- We also use Cross validation, as it improves the accuracy
+
+## Training model  
+
+1. Preparing data:  
+```{r}
+set.seed(999)
+intrain <- createDataPartition(y=train_data_clean$classe, p=0.75, list=FALSE)
+training <- train_data_clean[intrain,]
+validation <- train_data_clean[-intrain,]
+tc <- trainControl(method = "cv", number=5, allowParallel = TRUE)
+x <- training[,-53]
+y <- training[,53]
+```
+2. Initialize clusters:  
+```{r}
+cluster <- makeCluster(detectCores() - 1) 
+registerDoParallel(cluster)
+```
+3. Start training: 
+```{r}
+start_time <- Sys.time()
+fit_rf_p <- train(x,y,method = "rf", data=training, trControl = tc)
+end_time <- Sys.time()
+m1t <- (end_time - start_time)
+```
+4. Release resources:
+```{r}
+stopCluster(cluster)
+registerDoSEQ()
+```
+5. Test on validation set
+```{r}
+pred_rf <- predict(fit_rf_p,validation)
+confm <- confusionMatrix(pred_rf, validation$classe)
+print(confm)
+```
+Very high sensitivity and specificity have been achieved. So we use this model to predict on test set.  
+
+6. Calculate out of sample error:
+```{r}
+in_sample_error <- 1 - as.numeric( confusionMatrix(predict(fit_rf_p,training), training$classe)$overall[1])
+in_sample_error
+out_sample_error <- 1 - as.numeric(confm$overall[1])
+out_sample_error
+```
+The out sample error is **0.61%**, in sample error is 0. 
+
+7. Predictions on test data:  
+```{r}
+pred_rf_test <- predict(fit_rf_p,test_data_clean)
+pred_rf_test
+```
+
+## Model Visualization  
+
+Let's understand which features were most important in the model  
+```{r}
+plot(varImp(fit_rf_p), main = "Feature importance plot")
+```
+
+Lets see if the features identified as important appear in the rpart tree
+```{r}
+fit = train(classe~., method="rpart",data=train_data_clean)
+fancyRpartPlot(fit$finalModel)
+```
+
+We observe that the decision points use columns that are in the top 10 important features. This graph provides a clear visualization of the prediction process, that will help in justifying the prediction.  
+```{r, fig.height=2}
+plot(fit_rf_p$finalModel)
+```
+From this plot, we find that error stops reducing from around 50 trees.   
+
+Using the information gained on important features and number of trees, we can buid a smaller model, that will train quicker, without compromising much on accuracy. To do this we do the following modifications in fitting process:   
+- Choose only those columns that have greater than 50% importance  
+- Limit number of trees to 50
+```{r}
+var_imp <- data.frame(varImp(fit_rf_p)$importance)
+var_imp$col <- row.names(var_imp)
+selected_cols <- var_imp$col[var_imp$Overall > 50]
+selected_cols <- c(selected_cols, "classe")
+selected_cols
+train_small <- train_data %>% select(selected_cols)
+```
+Now we begin training process.  
+
+## Training smaller model  
+
+1. Preparing data:  
+```{r}
+set.seed(999)
+intrain <- createDataPartition(y=train_small$classe, p=0.75, list=FALSE)
+training <- train_small[intrain,]
+validation <- train_small[-intrain,]
+tc <- trainControl(method = "cv", number=5, allowParallel = TRUE)
+x <- training[,-8]
+y <- training[,8]
+```
+2. Initialize clusters:  
+```{r}
+cluster <- makeCluster(detectCores() - 1) 
+registerDoParallel(cluster)
+```
+3. Start training: 
+```{r}
+start_time <- Sys.time()
+fit_rf_p2 <- train(x,y,method = "rf", data=training, trControl = tc, ntree=50)
+end_time <- Sys.time()
+m2t <- (end_time - start_time)
+```
+4. Release resources:
+```{r}
+stopCluster(cluster)
+registerDoSEQ()
+```
+5. Test on validation set
+```{r}
+pred_rf2 <- predict(fit_rf_p2,validation)
+confm2 <- confusionMatrix(pred_rf2, validation$classe)
+confm2$overall
+```
+
+
+```{r}
+out_sample_error2<- 1 - as.numeric(confm2$overall[1])
+out_sample_error2
+```
+Checking if predictions match with original predictions:  
+```{r}
+selected_columns2 <- names(train_small)
+selected_columns2 <- selected_columns2[-8] #Excluding the 'classe' column name
+#selected_columns
+test_small <- test_data %>% select(selected_columns2)
+pred_rf_test2 <- predict(fit_rf_p2,test_small)
+sum(pred_rf_test == pred_rf_test2)
+```
+**The predictions from both models match completely for given test data.**
+
+## Summary of models:  
+
+```{r}
+train_time = c(m1t,m2t)
+train_time = cbind(c("Complete model", "Smaller model"),train_time)
+train_time = cbind(train_time, c(out_sample_error*100,out_sample_error2*100))
+train_time = cbind(train_time,c(as.numeric(confm$overall[1])*100,as.numeric(confm2$overall[1])*100))
+train_time = rbind(c("Model", "Train time", "Out sample error%", "Accuracy%"),train_time)
+knitr::kable(train_time, caption = "Summary table of models")
+```
+
+Therefore we have built a model that is almost 62 times faster, without compromising much on accuracy.
